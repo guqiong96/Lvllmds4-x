@@ -157,6 +157,7 @@ def fp8_mqa_logits_triton(
         return logits
 
     block_m = _fp8_mqa_logits_block_m(num_q, seq_len_kv)
+    block_d = _fp8_mqa_logits_block_d(head_dim)
     grid = (triton.cdiv(num_q, block_m), triton.cdiv(seq_len_kv, 128))
     _fp8_mqa_logits_kernel[grid](
         q,
@@ -181,7 +182,7 @@ def fp8_mqa_logits_triton(
         logits.stride(1),
         BLOCK_M=block_m,
         BLOCK_N=128,
-        BLOCK_D=64,
+        BLOCK_D=block_d,
         num_warps=4,
     )
     return logits
@@ -190,6 +191,12 @@ def fp8_mqa_logits_triton(
 def _fp8_mqa_logits_block_m(num_q: int, seq_len_kv: int) -> int:
     if seq_len_kv <= 16 * 1024:
         return 16
+    return 64
+
+
+def _fp8_mqa_logits_block_d(head_dim: int) -> int:
+    if head_dim >= 128:
+        return 128
     return 64
 
 
