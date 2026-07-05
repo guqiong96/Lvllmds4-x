@@ -7,6 +7,20 @@
 把 vLLM 的 **DeepSeek-V4-Flash** 推理从 SM90/SM100/SM120 扩展到 **SM80 / SM86 / SM89**，覆盖 Ampere 和 Ada GPU，例如 A100、RTX 3090、A10/A40、RTX 4090、L40/L40S/L4、RTX 6000 Ada。
 
 > ⚠️ 实验性 fork。仅供在 SM80 / SM86 / SM89 GPU 上自测 DeepSeek-V4-Flash。
+> 其中 **SM80/A800 适配仍是测试性适配**，不是生产支持承诺。
+
+### SM80/A800 当前状态
+
+SM80 路径已在 4× A800 上完成 DeepSeek-V4-Flash DSpark 推测解码冒烟与吞吐测试。测试配置使用
+`--speculative-config '{"method":"dspark","num_speculative_tokens":6,"draft_sample_method":"greedy"}'`、
+FlashInfer sampler、sparse MLA warmup、`max-num-batched-tokens=16384`。
+
+Decode 侧结果如下，基线为同一服务器上无 DSpark 的 `mbt16k` 结果：
+
+| 输入 -> 输出 | 并发 | DSpark decode | 无 DSpark decode | decode 提升 |
+|---|---:|---:|---:|---:|
+| 8,192 -> 1,024 | 1 | **229.8 tok/s/req** | 57.6 tok/s/req | **3.99×** |
+| 32,768 -> 1,024 | 1 | **274.2 tok/s/req** | 58.1 tok/s/req | **4.72×** |
 
 ---
 
@@ -45,10 +59,10 @@ DeepSeek-V4-Flash 用了 DeepSeek 稀疏注意力(DSA / Lightning Indexer)+ FP4 
 | 项 | 版本 |
 |---|---|
 | 适配 GPU | **SM80**(A100), **SM86**(RTX 3090 / A10 / A40), **SM89**(RTX 4090 / L40 / L40S / L4 / RTX 6000 Ada) |
-| 驱动 / CUDA toolkit | 595.x / **CUDA 12.8**(nvcc 12.8) |
+| 驱动 / CUDA toolkit | 595.x / **CUDA 13.0**(wheel 构建使用 `/usr/local/cuda-13.0`, nvcc 13.0.48) |
 | Python | 3.12(conda) |
-| torch | **2.11.0+cu128** |
-| vLLM | 本 fork = **0.11.1**(PR #41834 base + SM80 / SM86 / SM89 改动)，源码编译 |
+| torch | **2.11.0+cu130** |
+| vLLM | 本 fork = **0.23.1rc1.dev145**(DeepSeek-V4-Flash + SM80 / SM86 / SM89 改动)，源码编译 |
 
 ---
 
@@ -58,10 +72,10 @@ DeepSeek-V4-Flash 用了 DeepSeek 稀疏注意力(DSA / Lightning Indexer)+ FP4 
 
 ```bash
 conda create -n ds python=3.12 -y && conda activate ds
-pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
 ```
 
-### 3.2 Rust 工具链(vLLM 0.11 有 Rust frontend)
+### 3.2 Rust 工具链(vLLM 构建需要 Rust frontend)
 
 ```bash
 export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
@@ -85,29 +99,40 @@ git checkout sm80-deepseek-v4-flash
 ### 3.4 编译
 
 ```bash
-pip install -U "setuptools>=77,<81" setuptools-rust numpy packaging wheel
+uv pip install -U "setuptools>=77,<81" setuptools-rust numpy packaging wheel \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple
+export CUDA_HOME=/usr/local/cuda-13.0
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"
 export MAX_JOBS=16 NVCC_THREADS=2
-pip install -e . --no-build-isolation
+uv pip install -e . --no-build-isolation \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple \
+  --extra-index-url https://download.pytorch.org/whl/cu130
 ```
 
 > 如果只在单一 GPU 架构上部署，可以把 `TORCH_CUDA_ARCH_LIST` 缩小到目标架构，例如 A100 用 `8.0`，RTX 3090 用 `8.6`，RTX 4090 / L40 用 `8.9+PTX`。
 > DeepGEMM **不要**装(SM80 / SM86 / SM89 不走该路径)。
-> 编译完 torchvision/torchaudio 若是非 cu128 版会报 `torchvision::nms does not exist`，修:
-> `pip install --force-reinstall --no-deps --index-url https://download.pytorch.org/whl/cu128 torchvision torchaudio`
+> 编译完 torchvision/torchaudio 若是非 cu130 版会报 `torchvision::nms does not exist`，修:
+> `uv pip install --force-reinstall --no-deps --index-url https://download.pytorch.org/whl/cu130 torchvision torchaudio`
 
 ---
 
 ## 4. 可选:构建本地 wheel
 
 ```bash
-pip wheel . --no-build-isolation --no-deps -w dist/
+CUDA_HOME=/usr/local/cuda-13.0 \
+PATH=/usr/local/cuda-13.0/bin:$PATH \
+LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:${LD_LIBRARY_PATH:-} \
+uv pip wheel . --no-build-isolation --no-deps -w dist/ \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple \
+  --extra-index-url https://download.pytorch.org/whl/cu130
 ```
 
 安装自己构建的 wheel:
 
 ```bash
-pip install dist/vllm-*.whl --extra-index-url https://download.pytorch.org/whl/cu128
+uv pip install dist/vllm-*.whl --extra-index-url https://download.pytorch.org/whl/cu130
 ```
 
 当前分支更新频繁，建议优先从源码安装;只有在你自己构建并发布了匹配 SM80 / SM86 / SM89 的 wheel 后，再使用预编译 wheel 安装。
@@ -173,13 +198,13 @@ A: 长城是中国古代为抵御北方游牧民族入侵而修筑的、横跨�
 
 输入长度 sweep(256K 配置，均成功):64K(25s)/128K(37s)/200K(74s)/262K(71s)。
 
-### 7.3 性能(单并发，输出 512 token)
-| 输入 | TTFT | Prefill | Decode |
-|---|---|---|---|
-| 8,192 | 1.97s | **~4,160 tok/s** | **~82 tok/s** |
-| 32,768 | 7.81s | **~4,195 tok/s** | **~82 tok/s** |
+### 7.3 SM80/A800 DSpark decode 性能(单并发，输出 1,024 token)
+| 输入 | DSpark decode | 无 DSpark decode | decode 提升 |
+|---|---:|---:|---:|
+| 8,192 | **229.8 tok/s/req** | 57.6 tok/s/req | **3.99×** |
+| 32,768 | **274.2 tok/s/req** | 58.1 tok/s/req | **4.72×** |
 
-Decode ~82 tok/s 受 Marlin MoE 反量化开销影响(Ada 无 FP4 张量核)。
+SM80/A800 仍是测试性适配。这里仅列 decode 结果，长上下文 prefill 仍需单独评估。
 
 ### 7.4 Tool call(`deepseek_v4` parser)
 ```

@@ -7,6 +7,21 @@
 It extends vLLM's **DeepSeek-V4-Flash** inference from SM90/SM100/SM120 to **SM80 / SM86 / SM89**, covering Ampere and Ada GPUs such as A100, RTX 3090, A10/A40, RTX 4090, L40/L40S/L4, and RTX 6000 Ada.
 
 > ⚠️ Experimental fork. For self-testing DeepSeek-V4-Flash on SM80 / SM86 / SM89 GPUs only.
+> The **SM80/A800 path is a test-only adaptation**, not a production support commitment.
+
+### SM80/A800 status
+
+The SM80 path has passed DeepSeek-V4-Flash DSpark speculative decoding smoke and throughput tests
+on a 4× A800 server. The tested server used
+`--speculative-config '{"method":"dspark","num_speculative_tokens":6,"draft_sample_method":"greedy"}'`,
+the FlashInfer sampler, sparse MLA warmup, and `max-num-batched-tokens=16384`.
+
+Decode-side results below use the same server's `mbt16k` no-DSpark run as baseline:
+
+| input -> output | concurrency | DSpark decode | no-DSpark decode | decode speedup |
+|---|---:|---:|---:|---:|
+| 8,192 -> 1,024 | 1 | **229.8 tok/s/req** | 57.6 tok/s/req | **3.99×** |
+| 32,768 -> 1,024 | 1 | **274.2 tok/s/req** | 58.1 tok/s/req | **4.72×** |
 
 ---
 
@@ -45,10 +60,10 @@ DeepSeek-V4-Flash combines DeepSeek Sparse Attention (DSA / Lightning Indexer) +
 | Item | Version |
 |---|---|
 | Supported GPUs | **SM80** (A100), **SM86** (RTX 3090 / A10 / A40), **SM89** (RTX 4090 / L40 / L40S / L4 / RTX 6000 Ada) |
-| Driver / CUDA toolkit | 595.x / **CUDA 12.8** (nvcc 12.8) |
+| Driver / CUDA toolkit | 595.x / **CUDA 13.0** (wheel built with `/usr/local/cuda-13.0`, nvcc 13.0.48) |
 | Python | 3.12 (conda) |
-| torch | **2.11.0+cu128** |
-| vLLM | this fork = **0.11.1** (PR #41834 base + SM80 / SM86 / SM89 changes), built from source |
+| torch | **2.11.0+cu130** |
+| vLLM | this fork = **0.23.1rc1.dev145** (DeepSeek-V4-Flash + SM80 / SM86 / SM89 changes), built from source |
 
 ---
 
@@ -58,10 +73,10 @@ DeepSeek-V4-Flash combines DeepSeek Sparse Attention (DSA / Lightning Indexer) +
 
 ```bash
 conda create -n ds python=3.12 -y && conda activate ds
-pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
 ```
 
-### 3.2 Rust toolchain (vLLM 0.11 ships a Rust frontend)
+### 3.2 Rust toolchain (vLLM builds the Rust frontend)
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.95 --profile minimal
@@ -79,29 +94,40 @@ git checkout sm80-deepseek-v4-flash
 ### 3.4 Build
 
 ```bash
-pip install -U "setuptools>=77,<81" setuptools-rust numpy packaging wheel
+uv pip install -U "setuptools>=77,<81" setuptools-rust numpy packaging wheel \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple
+export CUDA_HOME=/usr/local/cuda-13.0
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"
 export MAX_JOBS=16 NVCC_THREADS=2
-pip install -e . --no-build-isolation
+uv pip install -e . --no-build-isolation \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple \
+  --extra-index-url https://download.pytorch.org/whl/cu130
 ```
 
 > If you deploy on a single GPU architecture, you can narrow `TORCH_CUDA_ARCH_LIST` to the target architecture: `8.0` for A100, `8.6` for RTX 3090, or `8.9+PTX` for RTX 4090 / L40.
 > Do **not** install DeepGEMM; this fork does not use that path on SM80 / SM86 / SM89.
-> If after the build torchvision/torchaudio are the non-cu128 builds you will see `torchvision::nms does not exist`; fix with:
-> `pip install --force-reinstall --no-deps --index-url https://download.pytorch.org/whl/cu128 torchvision torchaudio`
+> If after the build torchvision/torchaudio are the non-cu130 builds you will see `torchvision::nms does not exist`; fix with:
+> `uv pip install --force-reinstall --no-deps --index-url https://download.pytorch.org/whl/cu130 torchvision torchaudio`
 
 ---
 
 ## 4. Optional: build a local wheel
 
 ```bash
-pip wheel . --no-build-isolation --no-deps -w dist/
+CUDA_HOME=/usr/local/cuda-13.0 \
+PATH=/usr/local/cuda-13.0/bin:$PATH \
+LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:${LD_LIBRARY_PATH:-} \
+uv pip wheel . --no-build-isolation --no-deps -w dist/ \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple \
+  --extra-index-url https://download.pytorch.org/whl/cu130
 ```
 
 Install the locally built wheel:
 
 ```bash
-pip install dist/vllm-*.whl --extra-index-url https://download.pytorch.org/whl/cu128
+uv pip install dist/vllm-*.whl --extra-index-url https://download.pytorch.org/whl/cu130
 ```
 
 The branch changes frequently. Prefer source install unless you have built and published a wheel that matches SM80 / SM86 / SM89.
@@ -165,13 +191,13 @@ Longest input that completed: **768K (786,000 tokens, prefill ~147 s)**. 1M star
 
 Input-length sweep (256K config, all succeeded): 64K (25 s) / 128K (37 s) / 200K (74 s) / 262K (71 s).
 
-### 7.3 Performance (single concurrency, 512 output tokens)
-| input | TTFT | prefill | decode |
-|---|---|---|---|
-| 8,192 | 1.97 s | **~4,160 tok/s** | **~82 tok/s** |
-| 32,768 | 7.81 s | **~4,195 tok/s** | **~82 tok/s** |
+### 7.3 SM80/A800 DSpark decode performance (single concurrency, 1,024 output tokens)
+| input | DSpark decode | no-DSpark decode | decode speedup |
+|---|---:|---:|---:|
+| 8,192 | **229.8 tok/s/req** | 57.6 tok/s/req | **3.99×** |
+| 32,768 | **274.2 tok/s/req** | 58.1 tok/s/req | **4.72×** |
 
-Decode ~82 tok/s is bounded by Marlin MoE dequantization overhead (no FP4 tensor cores on Ada).
+The SM80/A800 path is still a test-only adaptation. This table only reports decode-side results; long-context prefill needs separate evaluation.
 
 ### 7.4 Tool call (`deepseek_v4` parser)
 ```
