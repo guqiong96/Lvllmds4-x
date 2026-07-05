@@ -1493,6 +1493,18 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+def test_dspark_target_layer_ids_affect_speculative_hash():
+    def make_config(layer_ids: list[int]) -> SpeculativeConfig:
+        speculative_config = object.__new__(SpeculativeConfig)
+        speculative_config.method = "dspark"
+        speculative_config.draft_model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(dspark_target_layer_ids=layer_ids)
+        )
+        return speculative_config
+
+    assert make_config([3, 7]).compute_hash() != make_config([4, 8]).compute_hash()
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig

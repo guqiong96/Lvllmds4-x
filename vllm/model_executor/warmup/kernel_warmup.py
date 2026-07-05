@@ -116,12 +116,13 @@ def _deepseek_v4_mtp_uniform_decode_warmup_requests(
     return tuple(reqs for reqs in candidates if reqs <= max_warmup_reqs)
 
 
-def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
-    max_tokens = getattr(runner, "max_num_tokens", 1)
-    block_table = runner.input_batch.block_table
-
+def _deepseek_v4_slot_mapping_warmup_v1(
+    runner: "GPUModelRunner",
+    max_tokens: int,
+) -> None:
     # Snapshot the runner buffers we mutate so warmup never leaks state into
     # the first real request.
+    block_table = runner.input_batch.block_table
     saved_query_start_loc_np: np.ndarray | None = None
     saved_query_start_loc_gpu: torch.Tensor | None = None
     if hasattr(runner, "query_start_loc"):
@@ -168,6 +169,66 @@ def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
             runner.query_start_loc.np[:2] = saved_query_start_loc_np
             assert saved_query_start_loc_gpu is not None
             runner.query_start_loc.gpu[:2].copy_(saved_query_start_loc_gpu)
+
+
+def _deepseek_v4_slot_mapping_warmup_v2(
+    runner: "GPUModelRunner",
+    max_tokens: int,
+) -> None:
+    block_tables = runner.block_tables
+    input_buffers = runner.input_buffers
+    query_start_loc_buffer = input_buffers.query_start_loc
+    positions_buffer = input_buffers.positions
+
+    max_warmup_tokens = _clamp_warmup_tokens(
+        max(_DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS),
+        min(max_tokens, positions_buffer.shape[0]),
+    )
+    if max_warmup_tokens <= 0:
+        return
+
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=runner.device)
+    saved_query_start_loc = query_start_loc_buffer[:2].clone()
+    saved_positions = positions_buffer[:max_warmup_tokens].clone()
+
+    try:
+        for requested_tokens in _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS:
+            num_tokens = _clamp_warmup_tokens(requested_tokens, max_warmup_tokens)
+            if num_tokens <= 0:
+                continue
+
+            query_start_loc_buffer[0] = 0
+            query_start_loc_buffer[1] = num_tokens
+            positions = positions_buffer[:num_tokens]
+            positions.copy_(
+                torch.arange(num_tokens, dtype=torch.int64, device=runner.device)
+            )
+
+            block_tables.compute_slot_mappings(
+                idx_mapping,
+                query_start_loc_buffer[:2],
+                positions,
+                num_tokens_padded=num_tokens,
+            )
+    finally:
+        query_start_loc_buffer[:2].copy_(saved_query_start_loc)
+        positions_buffer[:max_warmup_tokens].copy_(saved_positions)
+
+
+def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
+    max_tokens = getattr(runner, "max_num_tokens", 1)
+    if hasattr(runner, "input_batch"):
+        _deepseek_v4_slot_mapping_warmup_v1(runner, max_tokens)
+        return
+
+    if hasattr(runner, "block_tables") and hasattr(runner, "input_buffers"):
+        _deepseek_v4_slot_mapping_warmup_v2(runner, max_tokens)
+        return
+
+    logger.debug(
+        "Skipping DeepSeek V4 slot mapping warmup because the model runner "
+        "does not expose V1 input_batch or V2 block_tables/input_buffers."
+    )
 
 
 def _deepseek_v4_structured_output_bitmask_warmup(
