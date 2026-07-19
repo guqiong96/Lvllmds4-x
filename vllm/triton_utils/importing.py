@@ -51,7 +51,7 @@ if HAS_TRITON:
             HAS_TRITON = False
 
         # Check Triton CPU
-        if "cpu" in version("vllm"):
+        if "cpu" in version("lvllmds4-x"):
             if "cpu" in backends:
                 HAS_TRITON = True
             else:

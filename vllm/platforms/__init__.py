@@ -23,7 +23,7 @@ def vllm_version_matches_substr(substr: str) -> bool:
     from importlib.metadata import PackageNotFoundError, version
 
     try:
-        vllm_version = version("vllm")
+        vllm_version = version("lvllmds4-x")
     except PackageNotFoundError as e:
         logger.warning(
             "The vLLM package was not found, so its version could not be "

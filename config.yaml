@@ -1,0 +1,46 @@
+model: "/home/guqiong/Models/DeepSeek-V4-Flash-DSpark"
+host: "0.0.0.0"
+port: 8070
+tensor-parallel-size: 4
+#pipeline-parallel-size: 2 
+max-model-len: 2048
+gpu-memory-utilization: 0.85
+trust-remote-code: true
+tokenizer-mode: "auto"
+served-model-name: "DeepSeek-V4-Flash-DSpark"
+compilation_config.cudagraph_mode: "FULL_DECODE_ONLY"
+enable_prefix_caching: true
+enable-chunked-prefill: true
+max_num_batched_tokens: 256
+dtype: "bfloat16"
+max_num_seqs: 2
+# compilation_config.mode: "VLLM_COMPILE"
+enable-auto-tool-choice: true
+# mamba-ssm-cache-dtype: "float16"
+# reasoning-parser: "super_v3"
+# tool-call-parser: "qwen3_coder" 
+# speculative-config: '{"method":"qwen3_next_mtp","num_speculative_tokens":3}'
+# tool-call-parser: "minimax_m2"
+# reasoning-parser: "minimax_m2_append_think"
+# tool-call-parser: glm47
+# reasoning-parser: glm45
+# tool-call-parser: "kimi_k2"
+# reasoning-parser: "kimi_k2" 
+# mm-encoder-tp-mode: "data"
+# disable-cascade-attn: true
+# reasoning-parser: "step3p5" 
+# tool-call-parser: "step3p5"  
+# reasoning-parser: "qwen3"
+# tool-call-parser: "qwen3_coder"
+# reasoning-parser: "nemotron_v3"
+# reasoning-parser: "gemma4"
+# tool-call-parser: "gemma4"
+kv-cache-dtype: "fp8"  
+tokenizer-mode: "deepseek_v4"     
+tool-call-parser: "deepseek_v4"     
+reasoning-parser: "deepseek_v4"
+# speculative-config: '{"num_speculative_tokens": 3,"method": "deepseek_mtp"}'
+speculative-config: '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"greedy"}'
+block-size: 256 
+
+
