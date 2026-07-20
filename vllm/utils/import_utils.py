@@ -479,7 +479,8 @@ def has_deep_gemm() -> bool:
     override with a newer version), then falls back to the vendored copy
     bundled in the vLLM wheel.
     """
-    return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
+    # return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
+    return False
 
 
 def has_nixl_ep() -> bool:
