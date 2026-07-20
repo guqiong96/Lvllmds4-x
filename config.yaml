@@ -40,6 +40,6 @@ tokenizer-mode: "deepseek_v4"
 tool-call-parser: "deepseek_v4"     
 reasoning-parser: "deepseek_v4"
 # speculative-config: '{"num_speculative_tokens": 3,"method": "deepseek_mtp"}'
-# speculative-config: '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"greedy"}'
+speculative-config: '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"greedy"}'
 
 

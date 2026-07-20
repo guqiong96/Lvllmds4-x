@@ -1,222 +1,27 @@
-# DeepSeek-V4-Flash on SM80 / SM86 / SM89 — vLLM fork
+# Lvllmds4
 
-> 中文版见 [`README.md`](README.md)。
+A fork of [jasl/vllm](https://github.com/jasl/vllm) (branch: `codex/ds4-sm120-min-enable`) with CPU-GPU hybrid inference support for DeepSeek-V4 on SM120+.
 
-> This repository is a fork of [vllm-project/vllm](https://github.com/vllm-project/vllm). The branch already contains **PR #41834** (the SM120 portable Triton path) plus the **SM80 / SM86 / SM89 enablement commits**.
+## Origin
 
-It extends vLLM's **DeepSeek-V4-Flash** inference from SM90/SM100/SM120 to **SM80 / SM86 / SM89**, covering Ampere and Ada GPUs such as A100, RTX 3090, A10/A40, RTX 4090, L40/L40S/L4, and RTX 6000 Ada.
+This project integrates the CPU-GPU hybrid inference engine **[lk_moe](https://pypi.org/project/lk-moe/)** into a specialized vLLM fork:
 
-> ⚠️ Experimental fork. For self-testing DeepSeek-V4-Flash on SM80 / SM86 / SM89 GPUs only.
-> The **SM80/A800 path is a test-only adaptation**, not a production support commitment.
+- **Base vLLM Fork:** Forked from `jasl/vllm` (branch `codex/ds4-sm120-min-enable`), which provides the compatibility modifications needed for DeepSeek-V4 and the SM120 architecture.
+- **Hybrid Inference:** The lk_moe engine enables MOE layers to leverage both GPU VRAM and CPU system memory for collaborative computation, with NUMA-aware scheduling and expert weight management.
 
-### SM80/A800 status
+This version is purpose-built to run **DeepSeek V4 on hardware with SM120+ compute capability**.
 
-The SM80 path has passed DeepSeek-V4-Flash DSpark speculative decoding smoke and throughput tests
-on a 4× A800 server. The tested server used
-`--speculative-config '{"method":"dspark","num_speculative_tokens":6,"draft_sample_method":"greedy"}'`,
-the FlashInfer sampler, sparse MLA warmup, and `max-num-batched-tokens=16384`.
+## Relationship with LvLLM
 
-Decode-side results below use the same server's `mbt16k` no-DSpark run as baseline:
+Lvllmds4 and **[LvLLM](https://github.com/guqiong96/Lvllm)** are parallel projects of the same nature—both integrate the lk_moe hybrid inference engine into vLLM, but target different upstream vLLM branches for different model support:
 
-| input -> output | concurrency | DSpark decode | no-DSpark decode | decode speedup |
-|---|---:|---:|---:|---:|
-| 8,192 -> 1,024 | 1 | **229.8 tok/s/req** | 57.6 tok/s/req | **3.99×** |
-| 32,768 -> 1,024 | 1 | **274.2 tok/s/req** | 58.1 tok/s/req | **4.72×** |
+| Project | Upstream vLLM Branch | Target Model |
+|---------|---------------------|--------------|
+| [LvLLM](https://github.com/guqiong96/Lvllm) | Latest vLLM mainline | General MoE models (Qwen3, GLM, MiniMax, Kimi, etc.) |
+| Lvllmds4 (this repo) | `jasl/vllm` (`codex/ds4-sm120-min-enable`) | DeepSeek-V4 (SM120+) |
 
----
+Similarly, **[Lsglang](https://github.com/guqiong96/Lsglang)** integrates lk_moe into sglang for the same hybrid inference capabilities across frameworks.
 
-## 1. Background: why this fork
+## Usage Guide
 
-DeepSeek-V4-Flash combines DeepSeek Sparse Attention (DSA / Lightning Indexer) + FP4-expert MoE + mHC. Upstream defaults to **FlashMLA + DeepGEMM**, which are only built for Hopper / datacenter Blackwell. PR #41834 introduced a **portable Triton path** for **SM120 (consumer Blackwell)** to replace those kernels; this fork opens that path up further to **SM80 / SM86 / SM89**.
-
-| Subsystem | Upstream (SM90/100) | SM80 / SM86 / SM89 (this fork) |
-|---|---|---|
-| Sparse MLA attention | FlashMLA sparse | **Triton** (PR #41834 portable kernels) |
-| Lightning Indexer (FP8 MQA logits) | DeepGEMM | **Triton / torch fallback** |
-| o_proj FP8 einsum | DeepGEMM `fp8_einsum` | **Triton** (FP8 dot upcast to bf16) |
-| mHC pre/post GEMM | DeepGEMM / TileLang | **TileLang TF32** |
-| MoE (FP4 experts) | DeepGEMM / FlashInfer-CUTLASS FP4 | **Marlin WNA16** (FP4→FP16 dequant) |
-| Indexer Q rope+quant / KV dequant | **CuTe-DSL** | **Triton/torch fallback** |
-
-**Hardware fact:** SM80 / SM86 do not have native FP8 tensor cores. SM89 has FP8 tensor cores, but no FP4 tensor cores and no hardware microscaling MMA. This fork uses Triton / torch fallbacks and Marlin WNA16 on these GPUs instead of DeepGEMM / FlashInfer FP4 kernels.
-
-### SM80 / SM86 / SM89 changes
-
-- `vllm/v1/attention/backends/mla/sparse_mla_env.py` — folds SM80 / SM86 / SM89 into the Triton sparse-MLA path.
-- `vllm/utils/deep_gemm.py` / `models/deepseek_v4/nvidia/ops/sm12x_deep_gemm_fallbacks.py` — MQA-logits / HC-GEMM fallback dispatch extended to SM80 / SM86 / SM89.
-- `vllm/models/deepseek_v4/nvidia/ops/fp8_einsum.py` — Triton FP8 einsum extended to SM80 / SM86 / SM89 while preserving the bf16 B path.
-- `vllm/model_executor/kernels/mhc/tilelang.py` — mHC TF32 path extended to SM80 / SM86 / SM89.
-- `vllm/model_executor/layers/sparse_attn_indexer.py` / `v1/attention/backends/mla/indexer.py` — fix the init-time crash in `_sparse_indexer_requires_deep_gemm`; memory budget.
-- `vllm/models/deepseek_v4/sparse_mla.py` — `supports_compute_capability` made accurate.
-- **`vllm/utils/import_utils.py` — `has_cutedsl()` returns False on SM80 / SM86 / SM89**.
-- FP8 linear / MoE paths use Marlin W8A16 on SM80 / SM86 to avoid software-decode GEMMs on GPUs without native FP8 MMA.
-
-> See [`SM89_DEEPSEEK_V4_NOTES.md`](SM89_DEEPSEEK_V4_NOTES.md) for details.
-
----
-
-## 2. Supported hardware and validated environment
-
-| Item | Version |
-|---|---|
-| Supported GPUs | **SM80** (A100), **SM86** (RTX 3090 / A10 / A40), **SM89** (RTX 4090 / L40 / L40S / L4 / RTX 6000 Ada) |
-| Driver / CUDA toolkit | 595.x / **CUDA 13.0** (wheel built with `/usr/local/cuda-13.0`, nvcc 13.0.48) |
-| Python | 3.12 (conda) |
-| torch | **2.11.0+cu130** |
-| vLLM | this fork = **0.23.1rc1.dev145** (DeepSeek-V4-Flash + SM80 / SM86 / SM89 changes), built from source |
-
----
-
-## 3. Build from source (clone this repo)
-
-### 3.1 Conda env + torch
-
-```bash
-conda create -n ds python=3.12 -y && conda activate ds
-uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
-```
-
-### 3.2 Rust toolchain (vLLM builds the Rust frontend)
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.95 --profile minimal
-source "$HOME/.cargo/env"
-```
-
-### 3.3 Clone this repo
-
-```bash
-git clone https://github.com/yhfgyyf/vllm-deepseek-v4-sm80-sm86-sm89.git
-cd vllm-deepseek-v4-sm80-sm86-sm89
-git checkout sm80-deepseek-v4-flash
-```
-
-### 3.4 Build
-
-```bash
-uv pip install -U "setuptools>=77,<81" setuptools-rust numpy packaging wheel \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple
-export CUDA_HOME=/usr/local/cuda-13.0
-export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
-export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"
-export MAX_JOBS=16 NVCC_THREADS=2
-uv pip install -e . --no-build-isolation \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple \
-  --extra-index-url https://download.pytorch.org/whl/cu130
-```
-
-> If you deploy on a single GPU architecture, you can narrow `TORCH_CUDA_ARCH_LIST` to the target architecture: `8.0` for A100, `8.6` for RTX 3090, or `8.9+PTX` for RTX 4090 / L40.
-> Do **not** install DeepGEMM; this fork does not use that path on SM80 / SM86 / SM89.
-> If after the build torchvision/torchaudio are the non-cu130 builds you will see `torchvision::nms does not exist`; fix with:
-> `uv pip install --force-reinstall --no-deps --index-url https://download.pytorch.org/whl/cu130 torchvision torchaudio`
-
----
-
-## 4. Optional: build a local wheel
-
-```bash
-CUDA_HOME=/usr/local/cuda-13.0 \
-PATH=/usr/local/cuda-13.0/bin:$PATH \
-LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:${LD_LIBRARY_PATH:-} \
-uv pip wheel . --no-build-isolation --no-deps -w dist/ \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple \
-  --extra-index-url https://download.pytorch.org/whl/cu130
-```
-
-Install the locally built wheel:
-
-```bash
-uv pip install dist/vllm-*.whl --extra-index-url https://download.pytorch.org/whl/cu130
-```
-
-The branch changes frequently. Prefer source install unless you have built and published a wheel that matches SM80 / SM86 / SM89.
-
----
-
-## 5. Operator smoke test (no full model needed)
-
-```python
-import torch
-from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mla import sparse_mla_env as e
-print("cap:", current_platform.get_device_capability())          # (8, 9)
-print("is_ada_sm89:", e.is_ada_sm89())                            # True
-print("triton sparse mla:", e.is_triton_sparse_mla_enabled(torch.device("cuda:0")))  # True
-from vllm.model_executor.layers.sparse_attn_indexer import _sparse_indexer_requires_deep_gemm as r
-print("indexer needs deepgemm (fp8 cache):", r(False))           # False  <- key fix
-from vllm.utils.import_utils import has_cutedsl
-print("has_cutedsl:", has_cutedsl())                             # False on SM89
-```
-
----
-
-## 6. Deployment (vllm serve)
-
-```bash
-export VLLM_TRITON_MLA_SPARSE=1
-vllm serve /path/to/DeepSeek-V4-Flash \
-  --served-model-name deepseek-v4-flash \
-  --tensor-parallel-size 4 \
-  --kv-cache-dtype fp8_ds_mla \
-  --block-size 256 \
-  --max-model-len 262144 \
-  --gpu-memory-utilization 0.97 \
-  --max-num-seqs 16 \
-  --reasoning-parser deepseek_v4 \
-  --enable-auto-tool-choice --tool-call-parser deepseek_v4 \
-  --trust-remote-code --port 8000
-```
-
-Startup success markers: `Application startup complete.`, and the log shows `Using 'MARLIN' Mxfp4 MoE backend` / `Using FP8 indexer cache`.
-
----
-
-## 7. Test results (4× RTX 4090)
-
-### 7.1 Inference correctness
-```
-Q: Introduce the Great Wall in one sentence. (in Chinese)
-A: A coherent, accurate one-sentence answer is returned, finish_reason=stop.
-```
-
-### 7.2 Max context (KV cache)
-| max-model-len | max-num-seqs | GMU | GPU KV cache | per-request concurrency | startup |
-|---|---|---|---|---|---|
-| 262,144 (256K) | 16 | 0.97 | 972,374 tok | 3.71x | ✅ |
-| 786,432 (768K) | 16 | 0.97 | 1,220,509 tok | 1.55x | ✅ |
-| **1,048,576 (1M)** | 4 | 0.97 | **1,243,644 tok** | 1.19x | ✅ (model arch limit) |
-
-Longest input that completed: **768K (786,000 tokens, prefill ~147 s)**. 1M starts and the kernels run correctly, but a full 1M single-prompt prefill is **impractically slow (>10 min)**. Day-to-day, **128K–256K** is recommended.
-
-Input-length sweep (256K config, all succeeded): 64K (25 s) / 128K (37 s) / 200K (74 s) / 262K (71 s).
-
-### 7.3 SM80/A800 DSpark decode performance (single concurrency, 1,024 output tokens)
-| input | DSpark decode | no-DSpark decode | decode speedup |
-|---|---:|---:|---:|
-| 8,192 | **229.8 tok/s/req** | 57.6 tok/s/req | **3.99×** |
-| 32,768 | **274.2 tok/s/req** | 58.1 tok/s/req | **4.72×** |
-
-The SM80/A800 path is still a test-only adaptation. This table only reports decode-side results; long-context prefill needs separate evaluation.
-
-### 7.4 Tool call (`deepseek_v4` parser)
-```
-Q: What's Beijing's weather today? Answer in Celsius. (tools=[get_weather])
-→ finish_reason: tool_calls
-→ get_weather  arguments: {"city": "北京", "unit": "celsius"}   ✅
-```
-
----
-
-## 8. Known limitations / risks
-
-1. **MoE runs on Marlin**: correctness validated, but performance is below native FP4 MMA — the biggest remaining tuning opportunity.
-2. **Performance is not tuned for the 4090**: the fused_moe / scaled_mm tuned configs only cover RTX PRO 6000 / GB10; the 4090 uses default heuristics (the log prints "Performance might be sub-optimal").
-3. **Very long context**: 1M starts but prefill is impractically slow; single requests over 256K take several minutes.
-4. Validated only on 4× RTX 4090; other Ada GPUs (L40/L4, etc.) should work in principle but are untested.
-
----
-
-## 9. License / provenance
-
-Based on [vllm-project/vllm](https://github.com/vllm-project/vllm) (Apache-2.0) and its PR #41834. This fork keeps the same license. AI-assisted, human-validated.
+Pre-built releases and detailed installation/usage instructions for DeepSeek-V4 are available on the **[Releases page](https://github.com/guqiong96/Lvllmds4/releases)**.

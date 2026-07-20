@@ -1,229 +1,27 @@
-# DeepSeek-V4-Flash on SM80 / SM86 / SM89 — vLLM fork
+# Lvllmds4
 
-> English version: [`README_EN.md`](README_EN.md)
+A fork of [jasl/vllm](https://github.com/jasl/vllm) (branch: `codex/ds4-sm120-min-enable`) with CPU-GPU hybrid inference support for DeepSeek-V4 on SM120+.
 
-> 本仓库是 [vllm-project/vllm](https://github.com/vllm-project/vllm) 的 fork，分支已包含 **PR #41834**(SM120 可移植 Triton 路径)+ **SM80 / SM86 / SM89 适配 commit**。
+## Origin
 
-把 vLLM 的 **DeepSeek-V4-Flash** 推理从 SM90/SM100/SM120 扩展到 **SM80 / SM86 / SM89**，覆盖 Ampere 和 Ada GPU，例如 A100、RTX 3090、A10/A40、RTX 4090、L40/L40S/L4、RTX 6000 Ada。
+This project integrates the CPU-GPU hybrid inference engine **[lk_moe](https://pypi.org/project/lk-moe/)** into a specialized vLLM fork:
 
-> ⚠️ 实验性 fork。仅供在 SM80 / SM86 / SM89 GPU 上自测 DeepSeek-V4-Flash。
-> 其中 **SM80/A800 适配仍是测试性适配**，不是生产支持承诺。
+- **Base vLLM Fork:** Forked from `jasl/vllm` (branch `codex/ds4-sm120-min-enable`), which provides the compatibility modifications needed for DeepSeek-V4 and the SM120 architecture.
+- **Hybrid Inference:** The lk_moe engine enables MOE layers to leverage both GPU VRAM and CPU system memory for collaborative computation, with NUMA-aware scheduling and expert weight management.
 
-### SM80/A800 当前状态
+This version is purpose-built to run **DeepSeek V4 on hardware with SM120+ compute capability**.
 
-SM80 路径已在 4× A800 上完成 DeepSeek-V4-Flash DSpark 推测解码冒烟与吞吐测试。测试配置使用
-`--speculative-config '{"method":"dspark","num_speculative_tokens":6,"draft_sample_method":"greedy"}'`、
-FlashInfer sampler、sparse MLA warmup、`max-num-batched-tokens=16384`。
+## Relationship with LvLLM
 
-Decode 侧结果如下，基线为同一服务器上无 DSpark 的 `mbt16k` 结果：
+Lvllmds4 and **[LvLLM](https://github.com/guqiong96/Lvllm)** are parallel projects of the same nature—both integrate the lk_moe hybrid inference engine into vLLM, but target different upstream vLLM branches for different model support:
 
-| 输入 -> 输出 | 并发 | DSpark decode | 无 DSpark decode | decode 提升 |
-|---|---:|---:|---:|---:|
-| 8,192 -> 1,024 | 1 | **229.8 tok/s/req** | 57.6 tok/s/req | **3.99×** |
-| 32,768 -> 1,024 | 1 | **274.2 tok/s/req** | 58.1 tok/s/req | **4.72×** |
+| Project | Upstream vLLM Branch | Target Model |
+|---------|---------------------|--------------|
+| [LvLLM](https://github.com/guqiong96/Lvllm) | Latest vLLM mainline | General MoE models (Qwen3, GLM, MiniMax, Kimi, etc.) |
+| Lvllmds4 (this repo) | `jasl/vllm` (`codex/ds4-sm120-min-enable`) | DeepSeek-V4 (SM120+) |
 
----
+Similarly, **[Lsglang](https://github.com/guqiong96/Lsglang)** integrates lk_moe into sglang for the same hybrid inference capabilities across frameworks.
 
-## 1. 背景:为什么需要这个 fork
+## Usage Guide
 
-DeepSeek-V4-Flash 用了 DeepSeek 稀疏注意力(DSA / Lightning Indexer)+ FP4 专家 MoE + mHC。上游默认走 **FlashMLA + DeepGEMM**(只编译 Hopper / 数据中心 Blackwell)。PR #41834 为 **SM120(消费级 Blackwell)** 引入了一套**可移植 Triton 路径**替代这些内核;本 fork 在其之上把这套路径进一步放开到 **SM80 / SM86 / SM89**。
-
-| 子系统 | 上游(SM90/100) | SM80 / SM86 / SM89(本 fork) |
-|---|---|---|
-| Sparse MLA attention | FlashMLA sparse | **Triton**(PR #41834 可移植内核) |
-| Lightning Indexer(FP8 MQA logits) | DeepGEMM | **Triton / torch fallback** |
-| o_proj FP8 einsum | DeepGEMM `fp8_einsum` | **Triton**(FP8 dot 加 bf16 upcast) |
-| mHC pre/post GEMM | DeepGEMM / TileLang | **TileLang TF32** |
-| MoE(FP4 专家) | DeepGEMM / FlashInfer-CUTLASS FP4 | **Marlin WNA16**(FP4→FP16 反量化) |
-| Indexer Q rope+quant / KV dequant | **CuTe-DSL** | **Triton/torch fallback** |
-
-**硬件事实**:SM80 / SM86 没有原生 FP8 张量核;SM89 有 FP8 张量核，但没有 FP4 张量核、没有硬件 microscaling MMA。因此本 fork 在这些 GPU 上使用 Triton / torch fallback 和 Marlin WNA16 路径替代 DeepGEMM / FlashInfer FP4 内核。
-
-### SM80 / SM86 / SM89 相关改动
-
-- `vllm/v1/attention/backends/mla/sparse_mla_env.py` — 把 SM80 / SM86 / SM89 并入 Triton 稀疏 MLA 路径。
-- `vllm/utils/deep_gemm.py` / `models/deepseek_v4/nvidia/ops/sm12x_deep_gemm_fallbacks.py` — MQA logits / HC GEMM fallback dispatch 扩到 SM80 / SM86 / SM89。
-- `vllm/models/deepseek_v4/nvidia/ops/fp8_einsum.py` — Triton FP8 einsum 扩到 SM80 / SM86 / SM89，并保留 bf16 B 路径。
-- `vllm/model_executor/kernels/mhc/tilelang.py` — mHC TF32 路径扩到 SM80 / SM86 / SM89。
-- `vllm/model_executor/layers/sparse_attn_indexer.py` / `v1/attention/backends/mla/indexer.py` — 修复构造期会崩的 `_sparse_indexer_requires_deep_gemm`、内存预算。
-- `vllm/models/deepseek_v4/sparse_mla.py` — `supports_compute_capability` 修准确。
-- **`vllm/utils/import_utils.py` — `has_cutedsl()` 在 SM80 / SM86 / SM89 返回 False**。
-- FP8 linear / MoE 路径在 SM80 / SM86 上使用 Marlin W8A16，避免无原生 FP8 MMA 时的软件解码 GEMM。
-
-> 详见 [`SM89_DEEPSEEK_V4_NOTES.md`](SM89_DEEPSEEK_V4_NOTES.md)。
-
----
-
-## 2. 适配硬件与已验证环境
-
-| 项 | 版本 |
-|---|---|
-| 适配 GPU | **SM80**(A100), **SM86**(RTX 3090 / A10 / A40), **SM89**(RTX 4090 / L40 / L40S / L4 / RTX 6000 Ada) |
-| 驱动 / CUDA toolkit | 595.x / **CUDA 13.0**(wheel 构建使用 `/usr/local/cuda-13.0`, nvcc 13.0.48) |
-| Python | 3.12(conda) |
-| torch | **2.11.0+cu130** |
-| vLLM | 本 fork = **0.23.1rc1.dev145**(DeepSeek-V4-Flash + SM80 / SM86 / SM89 改动)，源码编译 |
-
----
-
-## 3. 源码安装(clone 本仓库编译)
-
-### 3.1 conda 环境 + torch
-
-```bash
-conda create -n ds python=3.12 -y && conda activate ds
-uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
-```
-
-### 3.2 Rust 工具链(vLLM 构建需要 Rust frontend)
-
-```bash
-export RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
-curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y --default-toolchain 1.95 --profile minimal
-source "$HOME/.cargo/env"
-# ~/.cargo/config.toml 配 crates 镜像:
-#   [source.crates-io]
-#   replace-with = "rsproxy-sparse"
-#   [source.rsproxy-sparse]
-#   registry = "sparse+https://rsproxy.cn/index/"
-```
-
-### 3.3 clone 本仓库
-
-```bash
-git clone https://github.com/yhfgyyf/vllm-deepseek-v4-sm80-sm86-sm89.git
-cd vllm-deepseek-v4-sm80-sm86-sm89
-git checkout sm80-deepseek-v4-flash
-```
-
-### 3.4 编译
-
-```bash
-uv pip install -U "setuptools>=77,<81" setuptools-rust numpy packaging wheel \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple
-export CUDA_HOME=/usr/local/cuda-13.0
-export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
-export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"
-export MAX_JOBS=16 NVCC_THREADS=2
-uv pip install -e . --no-build-isolation \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple \
-  --extra-index-url https://download.pytorch.org/whl/cu130
-```
-
-> 如果只在单一 GPU 架构上部署，可以把 `TORCH_CUDA_ARCH_LIST` 缩小到目标架构，例如 A100 用 `8.0`，RTX 3090 用 `8.6`，RTX 4090 / L40 用 `8.9+PTX`。
-> DeepGEMM **不要**装(SM80 / SM86 / SM89 不走该路径)。
-> 编译完 torchvision/torchaudio 若是非 cu130 版会报 `torchvision::nms does not exist`，修:
-> `uv pip install --force-reinstall --no-deps --index-url https://download.pytorch.org/whl/cu130 torchvision torchaudio`
-
----
-
-## 4. 可选:构建本地 wheel
-
-```bash
-CUDA_HOME=/usr/local/cuda-13.0 \
-PATH=/usr/local/cuda-13.0/bin:$PATH \
-LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:${LD_LIBRARY_PATH:-} \
-uv pip wheel . --no-build-isolation --no-deps -w dist/ \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple \
-  --extra-index-url https://download.pytorch.org/whl/cu130
-```
-
-安装自己构建的 wheel:
-
-```bash
-uv pip install dist/vllm-*.whl --extra-index-url https://download.pytorch.org/whl/cu130
-```
-
-当前分支更新频繁，建议优先从源码安装;只有在你自己构建并发布了匹配 SM80 / SM86 / SM89 的 wheel 后，再使用预编译 wheel 安装。
-
----
-
-## 5. 算子级自检(无需起完整模型)
-
-```python
-import torch
-from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mla import sparse_mla_env as e
-print("cap:", current_platform.get_device_capability())          # (8, 9)
-print("is_ada_sm89:", e.is_ada_sm89())                            # True
-print("triton sparse mla:", e.is_triton_sparse_mla_enabled(torch.device("cuda:0")))  # True
-from vllm.model_executor.layers.sparse_attn_indexer import _sparse_indexer_requires_deep_gemm as r
-print("indexer needs deepgemm (fp8 cache):", r(False))           # False ← 关键
-from vllm.utils.import_utils import has_cutedsl
-print("has_cutedsl:", has_cutedsl())                             # False on SM89
-```
-
----
-
-## 6. 部署(vllm serve)
-
-```bash
-export VLLM_TRITON_MLA_SPARSE=1
-vllm serve /path/to/DeepSeek-V4-Flash \
-  --served-model-name deepseek-v4-flash \
-  --tensor-parallel-size 4 \
-  --kv-cache-dtype fp8_ds_mla \
-  --block-size 256 \
-  --max-model-len 262144 \
-  --gpu-memory-utilization 0.97 \
-  --max-num-seqs 16 \
-  --reasoning-parser deepseek_v4 \
-  --enable-auto-tool-choice --tool-call-parser deepseek_v4 \
-  --trust-remote-code --port 8000
-```
-
-
-启动成功标志:`Application startup complete.`，日志里能看到 `Using 'MARLIN' Mxfp4 MoE backend` / `Using FP8 indexer cache`。
-
----
-
-## 7. 测试结果(4× RTX 4090)
-
-### 7.1 推理正确性
-```
-Q: 用一句话介绍长城。
-A: 长城是中国古代为抵御北方游牧民族入侵而修筑的、横跨多个朝代、绵延数千公里的
-   军事防御工程，也是世界文化遗产中象征中华民族坚韧精神的伟大奇迹。   (finish_reason=stop)
-```
-
-### 7.2 最大上下文(KV cache)
-| max-model-len | max-num-seqs | GMU | GPU KV cache | 单请求并发 | 启动 |
-|---|---|---|---|---|---|
-| 262,144 (256K) | 16 | 0.97 | 972,374 tok | 3.71x | ✅ |
-| 786,432 (768K) | 16 | 0.97 | 1,220,509 tok | 1.55x | ✅ |
-| **1,048,576 (1M)** | 4 | 0.97 | **1,243,644 tok** | 1.19x | ✅(模型架构上限) |
-
-实测能跑完的最长输入:**768K(786,000 token，prefill ~147s)**。1M 可启动、kernel 数值正确，但**满 1M 单次 prefill 极慢(>10 min)，不实用**。日常推荐 **128K~256K**。
-
-输入长度 sweep(256K 配置，均成功):64K(25s)/128K(37s)/200K(74s)/262K(71s)。
-
-### 7.3 SM80/A800 DSpark decode 性能(单并发，输出 1,024 token)
-| 输入 | DSpark decode | 无 DSpark decode | decode 提升 |
-|---|---:|---:|---:|
-| 8,192 | **229.8 tok/s/req** | 57.6 tok/s/req | **3.99×** |
-| 32,768 | **274.2 tok/s/req** | 58.1 tok/s/req | **4.72×** |
-
-SM80/A800 仍是测试性适配。这里仅列 decode 结果，长上下文 prefill 仍需单独评估。
-
-### 7.4 Tool call(`deepseek_v4` parser)
-```
-Q: 北京今天天气怎么样？请用摄氏度回答。  (tools=[get_weather])
-→ finish_reason: tool_calls
-→ get_weather  arguments: {"city": "北京", "unit": "celsius"}   ✅
-```
-
----
-
-## 8. 已知限制 / 风险
-
-1. **MoE 走 Marlin**:正确性已验证，但性能比原生 FP4 MMA 低。性能调优空间最大的一块。
-2. **性能未针对 4090 调优**:fused_moe / scaled_mm 的 tuned config 只覆盖 RTX PRO 6000 / GB10，4090 用默认 heuristic(日志会有 "Performance might be sub-optimal" 提示)。
-3. **超长上下文**:1M 可启动但 prefill 慢到不实用;>256K 单请求约数分钟。
-4. 仅在 4× RTX 4090 验证过;其它 Ada 卡(L40/L4 等)原理相同但未实测。
-
----
-
-## 9. 许可 / 来源
-
-代码基于 [vllm-project/vllm](https://github.com/vllm-project/vllm)(Apache-2.0)及其 PR #41834。本 fork 沿用同协议。AI 辅助完成，人工验证。
+Pre-built releases and detailed installation/usage instructions for DeepSeek-V4 are available on the **[Releases page](https://github.com/guqiong96/Lvllmds4/releases)**.
