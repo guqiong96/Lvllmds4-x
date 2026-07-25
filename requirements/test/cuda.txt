@@ -387,7 +387,7 @@ llvmlite==0.47.0
     # via numba
 lm-eval==0.4.12
     # via -r requirements/test/cuda.in
-lxml==5.3.0
+lxml==6.1.1
     # via
     #   blobfile
     #   gpt-oss
