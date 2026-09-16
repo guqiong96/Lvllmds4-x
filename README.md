@@ -2,6 +2,8 @@
 
 A fork of [yhfgyyf/vllm-deepseek-v4-sm89](https://github.com/yhfgyyf/vllm-deepseek-v4-sm89) with CPU-GPU hybrid inference support for DeepSeek-V4 on NVIDIA SM80+ (A100, RTX 4090, etc.).
 
+This project was dedicated to providing lk_moe hybrid inference integration for running DeepSeek-V4 on vLLM + SM80+. Now that the mainline vLLM DeepSeek-V4 SM80+ support has essentially matured, this project will no longer be updated. Please move to the Lvllm[https://github.com/guqiong96/Lvllm] project instead. Thank you.
+
 ## Origin
 
 This project integrates the CPU-GPU hybrid inference engine **[lk_moe](https://pypi.org/project/lk-moe/)** into a specialized vLLM fork:
